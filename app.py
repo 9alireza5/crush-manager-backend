@@ -12,13 +12,15 @@ def api_create_crush():
         if not request.is_json:
             return jsonify({"error": "Request must be JSON"}), 400
         data = request.get_json()
-        
+
         cnx = database_logic.get_db_connection()
         cursor = cnx.cursor()
-        
+
+
         new_crush_id = database_logic.create_new_crush(cursor, cnx, data)
         created_crush = database_logic.get_crush_details(cursor, new_crush_id) # Fetch the created crush to return it
-        
+
+
         return jsonify(created_crush), 201
         
     except ValueError as ve:
@@ -30,7 +32,7 @@ def api_create_crush():
     finally:
         if cursor:
             cursor.close()
-        if cnx and cnx.is_connected():
+        if cnx and cnx.ping():
             cnx.close()
 
 @app.route('/crushes', methods=['GET'])

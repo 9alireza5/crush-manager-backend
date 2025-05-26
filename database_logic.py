@@ -1,20 +1,21 @@
-import mysql.connector
+import mariadb
 import datetime
 
 class NotFoundError(Exception):
     pass
 
 def get_db_connection():
-    db_password = ""
+    db_password = "awx2er0fRBTFD1uKQjEXze4Q"
     try:
-        cnx = mysql.connector.connect(
-            host="localhost",
-            user="alirezza",
+        cnx = mariadb.connect(
+            host="vinson.liara.cloud",
+            user="root",
             password=db_password,
-            database="learningdb"
+            database="intelligent_lumiere",
+            port=34669
         )
         return cnx
-    except mysql.connector.Error as err:
+    except mariadb.Error as err:
         raise err
 
 def validate_text_field(value, field_name, max_length=None, allow_null=True):
@@ -137,6 +138,9 @@ def create_new_crush(cursor, cnx, crush_data):
                              future_plan, notes)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
+
+
+
     record_to_insert = (
         first_name, last_name, gender, acquaintance_date, age, phone_number, instagram_id,
         relationship_status, interaction_level, feelings_level,
@@ -147,7 +151,7 @@ def create_new_crush(cursor, cnx, crush_data):
         cursor.execute(insert_sql_query, record_to_insert)
         cnx.commit()
         return cursor.lastrowid
-    except mysql.connector.Error as err:
+    except mariadb.Error as err:
         cnx.rollback()
         raise err
 
@@ -204,7 +208,7 @@ def update_existing_crush(cursor, cnx, crush_id, update_data):
         cursor.execute(update_sql_query, tuple(updated_values))
         cnx.commit()
         return cursor.rowcount
-    except mysql.connector.Error as err:
+    except mariadb.Error as err:
         cnx.rollback()
         raise err
 
@@ -216,6 +220,6 @@ def delete_existing_crush(cursor, cnx, crush_id):
         cursor.execute(delete_sql_query, (crush_id,))
         cnx.commit()
         return cursor.rowcount
-    except mysql.connector.Error as err:
+    except mariadb.Error as err:
         cnx.rollback()
         raise err
