@@ -1,20 +1,20 @@
 import requests
 
-url = "http://172.30.27.202:5000/crushes"
+url = "http://172.30.27.29:5000/crushes"
 
 data = {
-    "first_name": "tina",
-    "last_name": "kouchak",
-    "gender": 'male',
+    "first_name": "parnian",
+    "last_name": "karimi",
+    "gender": 'female',
     "acquaintance_date": '2025-01-11',
-    "age": 25,
+    "age": 26,
     "phone_number": "09124055714",
-    "instagram_id": "@tina",
+    "instagram_id": "@parnian",
     "relationship_status": "kiri",
     "interaction_level": 2,
     "feelings_level": 1,
-    "future_plan": "kardan",
-    "notes": "ey joon"
+    "future_plan": "boos",
+    "notes": "oh oh oh"
 }
 
 response = requests.post(url, json=data)

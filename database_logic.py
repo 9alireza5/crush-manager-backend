@@ -29,11 +29,11 @@ def get_db_connection():
     db_password = "awx2er0fRBTFD1uKQjEXze4Q"
     try:
         cnx = mariadb.connect(
-            host="localhost",
-            user="alirezza",  # Ensure this user exists and has the necessary permissions
+            host="vinson.liara.cloud",
+            user="root",
             password=db_password,
-            database="learningdb",  # Ensure this database exists
-            port=3306  # Default MariaDB/MySQL port, change if necessary
+            database="intelligent_lumiere",
+            port=34669
         )
         return cnx
     except mariadb.Error as err:
