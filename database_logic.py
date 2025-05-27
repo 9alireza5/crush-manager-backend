@@ -10,7 +10,7 @@ class NotFoundError(Exception):
 def get_db_connection():
     # IMPORTANT: For production, use a strong password and consider environment variables
     # or a config file for credentials instead of hardcoding.
-    db_password = ""  # Replace with your actual password if needed
+    db_password = "awx2er0fRBTFD1uKQjEXze4Q"
     try:
         # Using mariadb.connect
         cnx = mariadb.connect(
