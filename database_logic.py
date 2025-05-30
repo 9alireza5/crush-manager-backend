@@ -26,11 +26,11 @@ def get_db_connection():
     db_password = "awx2er0fRBTFD1uKQjEXze4Q"  # Password from your uploaded file
     try:
         cnx = mariadb.connect(
-            host="localhost",
-            user="alirezza",
+            host="vinson.liara.cloud",
+            user="root",
             password=db_password,
-            database="learningdb",
-            port=3306
+            database="intelligent_lumiere",
+            port=34669
         )
         return cnx
     except mariadb.Error as err:
@@ -39,7 +39,6 @@ def get_db_connection():
 
 
 def create_tables_if_not_exist(cursor):
-    # Create users table with email and password reset fields
     cursor.execute('''
                    CREATE TABLE IF NOT EXISTS users
                    (
@@ -63,12 +62,11 @@ def create_tables_if_not_exist(cursor):
                    ) NOT NULL,
                        reset_token VARCHAR
                    (
-                       100
-                   ) UNIQUE NULLABLE, -- For password reset
-                       reset_token_expires_at DATETIME NULLABLE -- For password reset token expiration
+                       16
+                   ) UNIQUE,
+                       reset_token_expires_at DATETIME NULL
                        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
                    ''')
-    # Create crushes table (schema from previous version with user_id)
     cursor.execute('''
                    CREATE TABLE IF NOT EXISTS crushes
                    (
@@ -450,6 +448,7 @@ def create_new_crush_for_user(cursor, cnx, crush_data, user_id):
         cnx.commit()
         return cursor.lastrowid
     except mariadb.Error as err:
+        print(err)
         cnx.rollback()
         raise err
 

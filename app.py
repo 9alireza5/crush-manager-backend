@@ -1,16 +1,18 @@
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, make_response
 import mariadb
 import database_logic
 import jwt
 import datetime
 import functools  # For creating decorators
 import secrets  # For flask secret_key, though better from env var
+from flask_cors import CORS
 
 app = Flask(__name__)
 
+CORS(app, resources={r"/*": {"origins": "*"}})
 # IMPORTANT: Change this to a long, random, secret string in a production environment!
 # Load from an environment variable for better security.
-app.config['SECRET_KEY'] = secrets.token_hex(32)  # Generates a new random key each time app starts
+app.config['SECRET_KEY'] = 'test'  # Generates a new random key each time app starts
 # For consistent JWTs across restarts, set a fixed value from env.
 
 # --- One-time setup: Create tables when app starts (for development convenience) ---
@@ -22,6 +24,19 @@ try:
     cnx_init.close()
 except mariadb.Error as db_init_err:
     print(f"CRITICAL: Could not initialize database tables: {db_init_err}")
+
+
+
+@app.before_request
+def bypass_options():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.status_code = 200
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
+    return None
 
 
 # --- JWT Token Required Decorator ---
@@ -40,11 +55,11 @@ def token_required(f):
             return jsonify({"message": "Token is missing!"}), 401
 
         try:
-            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
+            data = jwt.decode(token, 'test', algorithms=["HS256"])
             g.current_user_id = data['user_id']  # Store user_id in g for the request context
         except jwt.ExpiredSignatureError:
             return jsonify({"message": "Token has expired!"}), 401
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
             return jsonify({"message": "Token is invalid!"}), 401
 
         return f(*args, **kwargs)
@@ -53,7 +68,7 @@ def token_required(f):
 
 
 # --- User Authentication Routes ---
-@app.route('/register', methods=['POST'])
+@app.route('/register', methods=['POST', 'OPTIONS'])
 def api_register_user():
     cnx = None;
     cursor = None
@@ -122,7 +137,7 @@ def api_login_user():
                 'username': user['username'],
                 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)  # Token expires in 24 hours
             }
-            token = jwt.encode(token_payload, app.config['SECRET_KEY'], algorithm="HS256")
+            token = jwt.encode(token_payload, 'test', algorithm="HS256")
 
             return jsonify({
                 "message": "Login successful",
@@ -477,4 +492,4 @@ def api_delete_crush(crush_id):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=8000)
