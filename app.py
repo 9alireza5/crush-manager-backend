@@ -3,17 +3,26 @@ import mariadb
 import database_logic
 import jwt
 import datetime
-import functools  # For creating decorators
-import secrets  # For flask secret_key, though better from env var
+import functools
+import secrets
+import os
+import google.generativeai as genai
 
 app = Flask(__name__)
 
-# IMPORTANT: Change this to a long, random, secret string in a production environment!
-# Load from an environment variable for better security.
-app.config['SECRET_KEY'] = secrets.token_hex(32)  # Generates a new random key each time app starts
-# For consistent JWTs across restarts, set a fixed value from env.
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', secrets.token_hex(32))
 
-# --- One-time setup: Create tables when app starts (for development convenience) ---
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+if not GEMINI_API_KEY:
+    print("WARNING: GEMINI_API_KEY environment variable not set. AI features will be disabled.")
+else:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        print("Gemini API configured successfully.")
+    except Exception as e:
+        print(f"Error configuring Gemini API: {e}")
+        GEMINI_API_KEY = None  # Disable AI if config fails
+
 try:
     cnx_init = database_logic.get_db_connection()
     cursor_init = cnx_init.cursor()
@@ -24,7 +33,6 @@ except mariadb.Error as db_init_err:
     print(f"CRITICAL: Could not initialize database tables: {db_init_err}")
 
 
-# --- JWT Token Required Decorator ---
 def token_required(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
@@ -41,7 +49,8 @@ def token_required(f):
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            g.current_user_id = data['user_id']  # Store user_id in g for the request context
+            g.current_user_id = data['user_id']
+            g.current_username = data.get('username', 'User')
         except jwt.ExpiredSignatureError:
             return jsonify({"message": "Token has expired!"}), 401
         except jwt.InvalidTokenError:
@@ -52,7 +61,6 @@ def token_required(f):
     return decorated
 
 
-# --- User Authentication Routes ---
 @app.route('/register', methods=['POST'])
 def api_register_user():
     cnx = None;
@@ -69,10 +77,9 @@ def api_register_user():
         email = data['email']
         password = data['password']
 
-        # Basic validation (can be more complex)
         if not username or len(username) < 3:
             return jsonify({"error": "Username must be at least 3 characters long"}), 400
-        if not email or '@' not in email:  # Very basic email check
+        if not email or '@' not in email:
             return jsonify({"error": "Invalid email format"}), 400
         if not password or len(password) < 6:
             return jsonify({"error": "Password must be at least 6 characters long"}), 400
@@ -91,7 +98,7 @@ def api_register_user():
         app.logger.error(f"Database error during registration: {dbe}")
         return jsonify({"error": "Database operation failed"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error during registration: {e}")
+        app.logger.error(f"Unexpected error during registration: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -120,7 +127,7 @@ def api_login_user():
             token_payload = {
                 'user_id': user['id'],
                 'username': user['username'],
-                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)  # Token expires in 24 hours
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
             }
             token = jwt.encode(token_payload, app.config['SECRET_KEY'], algorithm="HS256")
 
@@ -136,14 +143,13 @@ def api_login_user():
         app.logger.error(f"Database error during login: {dbe}")
         return jsonify({"error": "Database operation failed"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error during login: {e}")
+        app.logger.error(f"Unexpected error during login: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
         if cnx: cnx.close()
 
 
-# --- User Profile Routes ---
 @app.route('/profile', methods=['GET'])
 @token_required
 def api_get_profile():
@@ -155,13 +161,13 @@ def api_get_profile():
         cursor = cnx.cursor()
         user_profile = database_logic.get_user_by_id(cursor, current_user_id)
         if not user_profile:
-            return jsonify({"error": "User profile not found"}), 404  # Should not happen if token is valid
+            return jsonify({"error": "User profile not found"}), 404
         return jsonify(user_profile), 200
     except mariadb.Error as dbe:
         app.logger.error(f"Database error fetching profile: {dbe}")
         return jsonify({"error": "Could not fetch profile"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error fetching profile: {e}")
+        app.logger.error(f"Unexpected error fetching profile: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -185,11 +191,9 @@ def api_update_profile():
         if not new_email and not new_password:
             return jsonify({"error": "No fields provided for update (email or password)"}), 400
 
-        # Validate new email if provided
-        if new_email and ('@' not in new_email or len(new_email) < 5):  # Basic validation
+        if new_email and ('@' not in new_email or len(new_email) < 5):
             return jsonify({"error": "Invalid email format provided"}), 400
 
-        # Validate new password if provided
         if new_password and len(new_password) < 6:
             return jsonify({"error": "New password must be at least 6 characters long"}), 400
 
@@ -202,25 +206,23 @@ def api_update_profile():
             updated_profile = database_logic.get_user_by_id(cursor, current_user_id)
             return jsonify({"message": "Profile updated successfully", "profile": updated_profile}), 200
         else:
-            # This else might not be reached if errors are raised in update_user_profile
             return jsonify({"error": "Profile update failed or no changes made"}), 400
 
-    except database_logic.UserExistsError as uee:  # For email conflict
+    except database_logic.UserExistsError as uee:
         return jsonify({"error": str(uee)}), 409
-    except ValueError as ve:  # For "No fields provided"
+    except ValueError as ve:
         return jsonify({"error": str(ve)}), 400
     except mariadb.Error as dbe:
         app.logger.error(f"Database error updating profile: {dbe}")
         return jsonify({"error": "Database update failed"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error updating profile: {e}")
+        app.logger.error(f"Unexpected error updating profile: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
         if cnx: cnx.close()
 
 
-# --- Password Reset Routes ---
 @app.route('/forgot-password', methods=['POST'])
 def api_forgot_password():
     cnx = None;
@@ -232,37 +234,31 @@ def api_forgot_password():
         if not data or 'email' not in data:
             return jsonify({"error": "Email is required"}), 400
 
-        email = data['email']
+        email_address = data['email']
         cnx = database_logic.get_db_connection()
         cursor = cnx.cursor()
-        user = database_logic.get_user_by_email(cursor, email)
+        user = database_logic.get_user_by_email(cursor, email_address)
 
         if user:
             reset_token = database_logic.set_password_reset_token_for_user(cursor, cnx, user['id'])
-            # !!! IMPORTANT: SEND EMAIL TO USER HERE !!!
-            # This part requires an email sending setup (e.g., Flask-Mail and an SMTP server).
-            # The email should contain a link like:
-            # reset_url = f"https://yourfrontenddomain.com/reset-password?token={reset_token}"
-            # For now, we'll just return the token in the response for testing.
-            # In production, NEVER return the token directly in the API response here.
-            app.logger.info(f"Password reset token for {email} (user_id {user['id']}): {reset_token}")
-            app.logger.info(f"Simulated email sent to {email} with reset token.")
-            # mail_service.send_password_reset_email(user['email'], reset_token) # Placeholder
+            app.logger.info(f"Password reset token for {email_address} (user_id {user['id']}): {reset_token}")
+            app.logger.info(f"Simulated: Email would be sent to {email_address} with reset token.")
+            # In a real app, you would send an email here.
+            # e.g., mail_service.send_password_reset_email(user['email'], reset_token)
             return jsonify({
-                "message": "If an account with that email exists, a password reset link has been (simulated) sent.",
-                "_development_reset_token": reset_token  # For testing ONLY, remove in production
+                "message": "If an account with that email exists, a password reset link has been (simulated as) sent.",
+                "_development_reset_token": reset_token
             }), 200
         else:
-            # Still return a generic message to prevent email enumeration
-            app.logger.info(f"Password reset requested for non-existent email: {email}")
+            app.logger.info(f"Password reset requested for non-existent email: {email_address}")
             return jsonify({
-                               "message": "If an account with that email exists, a password reset link has been (simulated) sent."}), 200
+                               "message": "If an account with that email exists, a password reset link has been (simulated as) sent."}), 200
 
     except mariadb.Error as dbe:
         app.logger.error(f"Database error on forgot password: {dbe}")
         return jsonify({"error": "Database operation failed"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error on forgot password: {e}")
+        app.logger.error(f"Unexpected error on forgot password: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -296,7 +292,7 @@ def api_reset_password():
             if success:
                 return jsonify({"message": "Password has been reset successfully."}), 200
             else:
-                return jsonify({"error": "Password reset failed."}), 500  # Should not happen if token was valid
+                return jsonify({"error": "Password reset failed."}), 500
         else:
             return jsonify({"error": "Invalid or expired reset token."}), 400
 
@@ -304,14 +300,103 @@ def api_reset_password():
         app.logger.error(f"Database error on reset password: {dbe}")
         return jsonify({"error": "Database operation failed"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error on reset password: {e}")
+        app.logger.error(f"Unexpected error on reset password: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
         if cnx: cnx.close()
 
 
-# --- Crushes Routes (Now protected and user-specific) ---
+@app.route('/ai/get-advice', methods=['POST'])
+@token_required
+def api_get_ai_advice():
+    current_user_id = g.current_user_id
+    current_username = g.current_username
+
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "AI service is not configured."}), 503
+
+    cnx = None;
+    cursor = None
+    try:
+        if not request.is_json:
+            return jsonify({"error": "Request must be JSON"}), 400
+        data = request.get_json()
+        user_query = data.get('query')
+
+        if not user_query:
+            return jsonify({"error": "A 'query' field is required to ask for advice."}), 400
+
+        cnx = database_logic.get_db_connection()
+        cursor = cnx.cursor()
+
+        user_crush_data_summary = database_logic.get_crushes_summary_for_ai(cursor, current_user_id)
+
+        system_instruction = f"""
+        You are "Crush Advisor AI," a specialized assistant for user '{current_username}'.
+        Your role is to provide empathetic and constructive advice regarding their personal relationship dynamics,
+        based *solely* on the summary of their 'crush' information provided below and their specific query.
+
+        **Strict Operational Guidelines:**
+        1.  **Data Exclusivity:** Your advice MUST be based ONLY on the "User's Crush Data Summary" and "User's Query" provided in this prompt. Do NOT invent details, ask for unrelated personal information, or use any external knowledge or any_previous_chat_history.
+        2.  **Topic Adherence:** Confine your conversation strictly to relationship advice pertaining to the provided data. If the user attempts to steer the conversation to unrelated topics (e.g., general chat, other life issues, current events, politics, coding help), you MUST politely decline and state that you can only offer advice related to their provided crush information. For example: "I can only provide advice based on the crush information you've shared. How can I help with that?"
+        3.  **Privacy First:** Do NOT repeat large sections of the raw "User's Crush Data Summary" back to the user. You can refer to aspects of it generally to inform your advice but avoid echoing sensitive details.
+        4.  **Tone & Style:** Maintain a supportive, respectful, empathetic, and non-judgmental tone. Keep responses concise, actionable, and focused. Avoid making definitive predictions or giving absolute commands.
+        5.  **No External Actions:** You cannot access external websites, databases, or remember past interactions beyond the current prompt.
+        6.  **Safety:** Do not generate harmful, unethical, biased, or inappropriate content.
+        """
+
+        prompt_for_gemini = f"""{system_instruction}
+
+        **User's Crush Data Summary:**
+        {user_crush_data_summary}
+
+        **User's Query:**
+        "{user_query}"
+
+        **Advisor AI's Response (focused, empathetic, and actionable, respecting all guidelines):**
+        """
+
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+        generation_config = genai.types.GenerationConfig(
+            max_output_tokens=350,
+            temperature=0.75,
+        )
+
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        ]
+
+        response = model.generate_content(
+            prompt_for_gemini,
+            generation_config=generation_config,
+            safety_settings=safety_settings
+        )
+
+        ai_advice = response.text
+        return jsonify({"advice": ai_advice}), 200
+
+    except mariadb.Error as dbe:
+        app.logger.error(f"Database error in AI advisor: {dbe}")
+        return jsonify({"error": "Could not retrieve data for AI advice."}), 500
+    except Exception as e:
+        app.logger.error(f"Error in AI advisor: {e}", exc_info=True)
+        error_message = str(e).lower()
+        if "api key not valid" in error_message:
+            return jsonify({"error": "AI service authentication failed. Please check configuration."}), 500
+        if "quota" in error_message or "rate limit" in error_message:
+            return jsonify(
+                {"error": "AI service is temporarily unavailable due to high demand. Please try again later."}), 429
+        return jsonify({"error": "AI advisor could not process the request."}), 500
+    finally:
+        if cursor: cursor.close()
+        if cnx: cnx.close()
+
+
 @app.route('/crushes', methods=['POST'])
 @token_required
 def api_create_crush():
@@ -336,7 +421,7 @@ def api_create_crush():
         app.logger.error(f"Database error in api_create_crush: {dbe}")
         return jsonify({"error": "Database operation failed"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error in api_create_crush: {e}")
+        app.logger.error(f"Unexpected error in api_create_crush: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -350,26 +435,22 @@ def api_get_all_crushes():
     cnx = None;
     cursor = None
     try:
-        # Pagination parameters
         page = request.args.get('page', 1, type=int)
         limit = request.args.get('limit', 10, type=int)
         if page < 1: page = 1
         if limit < 1: limit = 1
-        if limit > 100: limit = 100  # Max limit
+        if limit > 100: limit = 100
 
-        # Sorting parameters
-        sort_by = request.args.get('sort_by', 'id')  # Default sort by id
+        sort_by = request.args.get('sort_by', 'id')
         sort_order = request.args.get('sort_order', 'asc').lower()
         if sort_order not in ['asc', 'desc']:
             sort_order = 'asc'
 
-        # Filtering parameters
         filters = {}
         if 'gender' in request.args:
             filters['gender'] = request.args.get('gender')
         if 'name_contains' in request.args:
             filters['name_contains'] = request.args.get('name_contains')
-        # Add more filters here as needed from request.args
 
         cnx = database_logic.get_db_connection()
         cursor = cnx.cursor()
@@ -381,13 +462,13 @@ def api_get_all_crushes():
             "page": page,
             "limit": limit,
             "total_count": total_count,
-            "total_pages": (total_count + limit - 1) // limit  # Calculate total pages
+            "total_pages": (total_count + limit - 1) // limit
         }), 200
     except mariadb.Error as dbe:
         app.logger.error(f"Database error in api_get_all_crushes: {dbe}")
         return jsonify({"error": "Database error"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error in api_get_all_crushes: {e}")
+        app.logger.error(f"Unexpected error in api_get_all_crushes: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -411,7 +492,7 @@ def api_get_crush(crush_id):
         app.logger.error(f"Database error in api_get_crush: {dbe}")
         return jsonify({"error": "Database error"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error in api_get_crush: {e}")
+        app.logger.error(f"Unexpected error in api_get_crush: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -445,7 +526,7 @@ def api_update_crush(crush_id):
         app.logger.error(f"Database error in api_update_crush: {dbe}")
         return jsonify({"error": "Database error during update"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error in api_update_crush: {e}")
+        app.logger.error(f"Unexpected error in api_update_crush: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -469,7 +550,7 @@ def api_delete_crush(crush_id):
         app.logger.error(f"Database error in api_delete_crush: {dbe}")
         return jsonify({"error": "Database error during deletion"}), 500
     except Exception as e:
-        app.logger.error(f"Unexpected error in api_delete_crush: {e}")
+        app.logger.error(f"Unexpected error in api_delete_crush: {e}", exc_info=True)
         return jsonify({"error": "An unexpected error occurred"}), 500
     finally:
         if cursor: cursor.close()
@@ -477,4 +558,9 @@ def api_delete_crush(crush_id):
 
 
 if __name__ == '__main__':
+    if not os.getenv('FLASK_SECRET_KEY'):
+        print("WARNING: FLASK_SECRET_KEY environment variable not set, using a temporary key for development.")
+    if not GEMINI_API_KEY:
+        print(
+            "WARNING: GEMINI_API_KEY environment variable not set. AI features will be disabled if not caught earlier.")
     app.run(debug=True, host='0.0.0.0', port=5000)

@@ -1,9 +1,8 @@
 import mariadb
 import datetime
-import secrets  # For generating secure random tokens
+import secrets
 from passlib.context import CryptContext
 
-# --- Password Hashing Setup ---
 pwd_context = CryptContext(
     schemes=["argon2", "bcrypt"],
     deprecated="auto"
@@ -23,7 +22,7 @@ class UnauthorizedError(Exception):
 
 
 def get_db_connection():
-    db_password = "awx2er0fRBTFD1uKQjEXze4Q"  # Password from your uploaded file
+    db_password = "awx2er0fRBTFD1uKQjEXze4Q"
     try:
         cnx = mariadb.connect(
             host="localhost",
@@ -39,7 +38,6 @@ def get_db_connection():
 
 
 def create_tables_if_not_exist(cursor):
-    # Create users table with email and password reset fields
     cursor.execute('''
                    CREATE TABLE IF NOT EXISTS users
                    (
@@ -56,7 +54,7 @@ def create_tables_if_not_exist(cursor):
                        email VARCHAR
                    (
                        120
-                   ) UNIQUE NOT NULL, -- Added email field
+                   ) UNIQUE NOT NULL,
                        password_hash VARCHAR
                    (
                        255
@@ -64,11 +62,10 @@ def create_tables_if_not_exist(cursor):
                        reset_token VARCHAR
                    (
                        100
-                   ) UNIQUE NULLABLE, -- For password reset
-                       reset_token_expires_at DATETIME NULLABLE -- For password reset token expiration
+                   ) UNIQUE NULLABLE,
+                       reset_token_expires_at DATETIME NULLABLE
                        ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
                    ''')
-    # Create crushes table (schema from previous version with user_id)
     cursor.execute('''
                    CREATE TABLE IF NOT EXISTS crushes
                    (
@@ -127,7 +124,6 @@ def create_tables_if_not_exist(cursor):
     print("Checked/Created 'users' (updated with email/reset fields) and 'crushes' tables.")
 
 
-# --- Password Utilities ---
 def hash_password(password):
     return pwd_context.hash(password)
 
@@ -136,20 +132,16 @@ def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
 
-# --- User Management Functions ---
 def add_user(cursor, cnx, username, email, password):
-    # Check if username or email already exists
     cursor.execute("SELECT id FROM users WHERE username = ? OR email = ?", (username, email))
     existing_user = cursor.fetchone()
     if existing_user:
-        # Determine if it's username or email conflict for a more specific error
         cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
         if cursor.fetchone():
             raise UserExistsError(f"Username '{username}' already exists.")
         cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
         if cursor.fetchone():
             raise UserExistsError(f"Email '{email}' already registered.")
-        # Fallback, though one of the above should have caught it
         raise UserExistsError("Username or email already exists.")
 
     hashed_pwd = hash_password(password)
@@ -188,12 +180,10 @@ def get_user_by_email(cursor, email):
 
 
 def update_user_profile(cursor, cnx, user_id, email=None, new_password=None):
-    # Updates user's email and/or password.
     set_clauses = []
     update_values = []
 
     if email:
-        # Check if new email is already taken by another user
         cursor.execute("SELECT id FROM users WHERE email = ? AND id != ?", (email, user_id))
         if cursor.fetchone():
             raise UserExistsError(f"Email '{email}' is already registered by another user.")
@@ -216,49 +206,40 @@ def update_user_profile(cursor, cnx, user_id, email=None, new_password=None):
         return cursor.rowcount > 0
     except mariadb.Error as err:
         cnx.rollback()
-        # Handle specific unique constraint error for email if not caught above (though less likely now)
-        if err.errno == 1062:  # MySQL/MariaDB error code for duplicate entry
+        if err.errno == 1062:
             raise UserExistsError(f"Email '{email}' might already be in use.")
         raise err
 
 
 def set_password_reset_token_for_user(cursor, cnx, user_id):
-    # Generates a secure token, stores its hash, and sets expiration.
-    token = secrets.token_urlsafe(32)  # Generate a secure URL-safe token
-    # For simplicity, we'll store the token directly. For higher security, hash it.
-    # However, reset tokens are short-lived and single-use, so direct storage is common.
-    expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=1)  # Token valid for 1 hour
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
 
     try:
         cursor.execute("UPDATE users SET reset_token = ?, reset_token_expires_at = ? WHERE id = ?",
                        (token, expires_at, user_id))
         cnx.commit()
-        return token  # Return the plain token to be sent to the user (e.g., via email)
+        return token
     except mariadb.Error as err:
         cnx.rollback()
         raise err
 
 
 def get_user_by_reset_token(cursor, token):
-    # Retrieves user by a valid (non-expired) reset token.
     cursor.execute("SELECT id, username, email, reset_token_expires_at FROM users WHERE reset_token = ?", (token,))
     row = cursor.fetchone()
     if not row:
-        return None  # Token not found
+        return None
 
     columns = [desc[0] for desc in cursor.description]
     user = dict(zip(columns, row))
 
-    # Check if token has expired
     if user['reset_token_expires_at'] < datetime.datetime.utcnow():
-        # Token expired, clear it (optional, or handle on successful reset)
-        # clear_password_reset_token(cursor, cnx, user['id']) # Requires cnx
         return None
     return user
 
 
 def reset_user_password(cursor, cnx, user_id, new_password):
-    # Updates the user's password and clears the reset token.
     hashed_pwd = hash_password(new_password)
     try:
         cursor.execute(
@@ -271,8 +252,6 @@ def reset_user_password(cursor, cnx, user_id, new_password):
         raise err
 
 
-# --- Validation Functions (for crushes data) ---
-# These are kept from the previous version.
 def validate_text_field(value, field_name, max_length=None, allow_null=True):
     if value is None:
         if allow_null: return None
@@ -336,42 +315,52 @@ def validate_date_field(value, field_name, allow_null=True):
         raise ValueError(f"'{field_name}' has an invalid date format. Please use YYYY-MM-DD.")
 
 
-# --- Crush Management Functions (User-specific, with Pagination, Sorting, Filtering) ---
-def list_all_crushes_for_user(cursor, user_id, page=1, limit=10, sort_by='id', sort_order='asc', filters=None):
-    # Lists crushes for a specific user with pagination, sorting, and filtering.
+def get_crushes_summary_for_ai(cursor, user_id):
+    query = "SELECT first_name, notes, relationship_status, interaction_level, feelings_level FROM crushes WHERE user_id = ?"
+    cursor.execute(query, (user_id,))
+    rows = cursor.fetchall()
+    if not rows:
+        return "User has no recorded crush information to discuss."
 
-    # Base query
+    summary_parts = []
+    for row_data in rows:
+        columns = [desc[0] for desc in cursor.description]
+        crush_info = dict(zip(columns, row_data))
+        summary_parts.append(
+            f"- Crush: {crush_info.get('first_name', 'N/A')}. "
+            f"Status: {crush_info.get('relationship_status', 'N/A')}. "
+            f"Interaction: {crush_info.get('interaction_level', 'N/A')}/5. "
+            f"User's Feelings: {crush_info.get('feelings_level', 'N/A')}/5. "
+            f"Notes: '{crush_info.get('notes', 'No specific notes.')}'"
+        )
+    return "\n".join(summary_parts)
+
+
+def list_all_crushes_for_user(cursor, user_id, page=1, limit=10, sort_by='id', sort_order='asc', filters=None):
     query_params = [user_id]
     base_query = "SELECT * FROM crushes WHERE user_id = ?"
 
-    # Filtering
     filter_clauses = []
     if filters:
         if 'gender' in filters and filters['gender']:
             filter_clauses.append("gender = ?")
             query_params.append(filters['gender'])
         if 'name_contains' in filters and filters['name_contains']:
-            # Search in first_name or last_name
             filter_clauses.append("(first_name LIKE ? OR last_name LIKE ?)")
             query_params.append(f"%{filters['name_contains']}%")
             query_params.append(f"%{filters['name_contains']}%")
-        # Add more filters as needed (e.g., for age range, date range)
 
     if filter_clauses:
         base_query += " AND " + " AND ".join(filter_clauses)
 
-    # Sorting - Sanitize sort_by to prevent SQL injection
-    allowed_sort_columns = ['id', 'first_name', 'last_name', 'acquaintance_date', 'age', 'relationship_status']
+    allowed_sort_columns = ['id', 'first_name', 'last_name', 'acquaintance_date', 'age', 'relationship_status',
+                            'interaction_level', 'feelings_level']
     if sort_by not in allowed_sort_columns:
-        sort_by = 'id'  # Default sort column if invalid
+        sort_by = 'id'
 
     sort_order_sql = "ASC" if sort_order.lower() == 'asc' else "DESC"
-    # Note: Directly inserting sort_by and sort_order_sql is generally safe if validated against a whitelist.
-    # For sort_by, we're ensuring it's one of the allowed_sort_columns.
-    # For sort_order_sql, we're ensuring it's either ASC or DESC.
     base_query += f" ORDER BY {sort_by} {sort_order_sql}"
 
-    # Pagination
     offset = (page - 1) * limit
     base_query += " LIMIT ? OFFSET ?"
     query_params.extend([limit, offset])
@@ -379,24 +368,19 @@ def list_all_crushes_for_user(cursor, user_id, page=1, limit=10, sort_by='id', s
     cursor.execute(base_query, tuple(query_params))
     rows = cursor.fetchall()
 
-    # Get total count for pagination metadata
     count_query = "SELECT COUNT(*) FROM crushes WHERE user_id = ?"
-    count_params = [user_id]
-    if filter_clauses:  # Apply same filters to count query
-        count_query += " AND " + " AND ".join(filter_clauses)
-        # Need to reconstruct count_params carefully if filters were applied
-        # The initial user_id is always there. Filter params are appended after it.
-        filter_param_start_index = 1  # user_id is at index 0 of query_params
-        for i, clause in enumerate(filter_clauses):
-            if "LIKE ?" in clause:  # name_contains uses two params
-                count_params.append(query_params[filter_param_start_index])
-                count_params.append(query_params[filter_param_start_index + 1])
-                filter_param_start_index += 2
-            else:
-                count_params.append(query_params[filter_param_start_index])
-                filter_param_start_index += 1
+    count_params_list = [user_id]  # Use a list to append filter parameters
 
-    cursor.execute(count_query, tuple(count_params))
+    current_query_param_index = 1  # Start after user_id for filters
+    if filter_clauses:
+        count_query += " AND " + " AND ".join(filter_clauses)
+        for filter_clause in filter_clauses:
+            num_placeholders_in_clause = filter_clause.count('?')
+            for _ in range(num_placeholders_in_clause):
+                count_params_list.append(query_params[current_query_param_index])
+                current_query_param_index += 1
+
+    cursor.execute(count_query, tuple(count_params_list))
     total_count = cursor.fetchone()[0]
 
     if not rows:
@@ -458,27 +442,28 @@ def update_existing_crush_for_user(cursor, cnx, crush_id, user_id, update_data):
     set_clauses = []
     updated_values = []
 
-    if 'first_name' in update_data:
-        set_clauses.append("first_name = ?")
-        updated_values.append(
-            validate_text_field(update_data['first_name'], 'first_name', max_length=255, allow_null=False))
-    if 'last_name' in update_data:
-        set_clauses.append("last_name = ?")
-        updated_values.append(
-            validate_text_field(update_data['last_name'], 'last_name', max_length=255, allow_null=True))
-    if 'gender' in update_data:
-        set_clauses.append("gender = ?")
-        updated_values.append(validate_gender_field(update_data['gender'], 'gender', allow_null=True))
-    # ... (add similar blocks for all other updatable crush fields from your schema)
-    if 'acquaintance_date' in update_data:
-        set_clauses.append("acquaintance_date = ?")
-        updated_values.append(
-            validate_date_field(update_data.get('acquaintance_date'), 'acquaintance_date', allow_null=True))
-    if 'age' in update_data:
-        set_clauses.append("age = ?")
-        updated_values.append(
-            validate_integer_field(update_data.get('age'), 'age', min_val=0, max_val=120, allow_null=True))
-    # ... continue for all fields
+    crush_fields = {
+        'first_name': lambda val: validate_text_field(val, 'first_name', max_length=255, allow_null=False),
+        'last_name': lambda val: validate_text_field(val, 'last_name', max_length=255, allow_null=True),
+        'gender': lambda val: validate_gender_field(val, 'gender', allow_null=True),
+        'acquaintance_date': lambda val: validate_date_field(val, 'acquaintance_date', allow_null=True),
+        'age': lambda val: validate_integer_field(val, 'age', min_val=0, max_val=120, allow_null=True),
+        'phone_number': lambda val: validate_text_field(val, 'phone_number', max_length=20, allow_null=True),
+        'instagram_id': lambda val: validate_text_field(val, 'instagram_id', max_length=50, allow_null=True),
+        'relationship_status': lambda val: validate_text_field(val, 'relationship_status', max_length=50,
+                                                               allow_null=True),
+        'interaction_level': lambda val: validate_integer_field(val, 'interaction_level', min_val=1, max_val=5,
+                                                                allow_null=True),
+        'feelings_level': lambda val: validate_integer_field(val, 'feelings_level', min_val=1, max_val=5,
+                                                             allow_null=True),
+        'future_plan': lambda val: validate_text_field(val, 'future_plan', max_length=255, allow_null=True),
+        'notes': lambda val: validate_text_field(val, 'notes', allow_null=True)
+    }
+
+    for field, validator in crush_fields.items():
+        if field in update_data:
+            set_clauses.append(f"{field} = ?")
+            updated_values.append(validator(update_data[field]))
 
     if not set_clauses:
         raise ValueError("No valid fields provided for update.")
