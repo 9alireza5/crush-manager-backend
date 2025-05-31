@@ -1,10 +1,11 @@
 import requests
 
-url = "http://172.30.27.29:5000/register"
+url = "http://172.30.26.44:5000/register"
 
 data = {
-    "username": "modos",
-    "password": "modosmodos",
+    "username": "aliali",
+    "password": "aliali",
+    "email": "aliali@gmail.com",
 }
 
 response = requests.post(url, json=data)
