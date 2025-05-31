@@ -21,7 +21,7 @@ else:
         print("Gemini API configured successfully.")
     except Exception as e:
         print(f"Error configuring Gemini API: {e}")
-        GEMINI_API_KEY = None  # Disable AI if config fails
+        GEMINI_API_KEY = None
 
 try:
     cnx_init = database_logic.get_db_connection()
@@ -42,19 +42,19 @@ def token_required(f):
             try:
                 token = auth_header.split(" ")[1]
             except IndexError:
-                return jsonify({"message": "Malformed token. Use Bearer scheme."}), 400
+                return jsonify({"error": "Malformed token. Use Bearer scheme."}), 400
 
         if not token:
-            return jsonify({"message": "Token is missing!"}), 401
+            return jsonify({"error": "Token is missing!"}), 401
 
         try:
             data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=["HS256"])
             g.current_user_id = data['user_id']
             g.current_username = data.get('username', 'User')
         except jwt.ExpiredSignatureError:
-            return jsonify({"message": "Token has expired!"}), 401
+            return jsonify({"error": "Token has expired!"}), 401
         except jwt.InvalidTokenError:
-            return jsonify({"message": "Token is invalid!"}), 401
+            return jsonify({"error": "Token is invalid!"}), 401
 
         return f(*args, **kwargs)
 
@@ -79,7 +79,7 @@ def api_register_user():
 
         if not username or len(username) < 3:
             return jsonify({"error": "Username must be at least 3 characters long"}), 400
-        if not email or '@' not in email:
+        if not email or '@' not in email or '.' not in email.split('@')[-1]:
             return jsonify({"error": "Invalid email format"}), 400
         if not password or len(password) < 6:
             return jsonify({"error": "Password must be at least 6 characters long"}), 400
@@ -191,7 +191,7 @@ def api_update_profile():
         if not new_email and not new_password:
             return jsonify({"error": "No fields provided for update (email or password)"}), 400
 
-        if new_email and ('@' not in new_email or len(new_email) < 5):
+        if new_email and ('@' not in new_email or '.' not in new_email.split('@')[-1] or len(new_email) < 5):
             return jsonify({"error": "Invalid email format provided"}), 400
 
         if new_password and len(new_password) < 6:
@@ -243,8 +243,6 @@ def api_forgot_password():
             reset_token = database_logic.set_password_reset_token_for_user(cursor, cnx, user['id'])
             app.logger.info(f"Password reset token for {email_address} (user_id {user['id']}): {reset_token}")
             app.logger.info(f"Simulated: Email would be sent to {email_address} with reset token.")
-            # In a real app, you would send an email here.
-            # e.g., mail_service.send_password_reset_email(user['email'], reset_token)
             return jsonify({
                 "message": "If an account with that email exists, a password reset link has been (simulated as) sent.",
                 "_development_reset_token": reset_token
@@ -385,12 +383,12 @@ def api_get_ai_advice():
         return jsonify({"error": "Could not retrieve data for AI advice."}), 500
     except Exception as e:
         app.logger.error(f"Error in AI advisor: {e}", exc_info=True)
-        error_message = str(e).lower()
-        if "api key not valid" in error_message:
+        error_message_str = str(e).lower()
+        if "api key not valid" in error_message_str:
             return jsonify({"error": "AI service authentication failed. Please check configuration."}), 500
-        if "quota" in error_message or "rate limit" in error_message:
-            return jsonify(
-                {"error": "AI service is temporarily unavailable due to high demand. Please try again later."}), 429
+        if "quota" in error_message_str or "rate limit" in error_message_str or "resource has been exhausted" in error_message_str:
+            return jsonify({
+                               "error": "AI service is temporarily unavailable due to high demand or usage limits. Please try again later."}), 429
         return jsonify({"error": "AI advisor could not process the request."}), 500
     finally:
         if cursor: cursor.close()
@@ -415,8 +413,12 @@ def api_create_crush():
         return jsonify(created_crush), 201
     except ValueError as ve:
         return jsonify({"error": "Invalid data provided", "details": str(ve)}), 400
-    except database_logic.UnauthorizedError as ue:
+    except database_logic.UnauthorizedError as ue:  # Should not be hit if logic is correct
+        app.logger.warning(f"UnauthorizedError in create_crush for user {current_user_id}: {ue}")
         return jsonify({"error": str(ue)}), 403
+    except database_logic.NotFoundError as nfe:  # If get_crush_details_for_user fails after creation
+        app.logger.error(f"NotFoundError after creating crush for user {current_user_id}: {nfe}")
+        return jsonify({"error": "Could not retrieve crush after creation."}), 500
     except mariadb.Error as dbe:
         app.logger.error(f"Database error in api_create_crush: {dbe}")
         return jsonify({"error": "Database operation failed"}), 500
@@ -447,10 +449,27 @@ def api_get_all_crushes():
             sort_order = 'asc'
 
         filters = {}
-        if 'gender' in request.args:
-            filters['gender'] = request.args.get('gender')
-        if 'name_contains' in request.args:
-            filters['name_contains'] = request.args.get('name_contains')
+        param_types = {
+            'gender': str, 'name_contains': str,
+            'min_age': int, 'max_age': int,
+            'acquaintance_date_after': str, 'acquaintance_date_before': str,
+            'interaction_level': int, 'feelings_level': int
+        }
+        for key, param_type in param_types.items():
+            if key in request.args:
+                try:
+                    if param_type == int:
+                        filters[key] = request.args.get(key, type=int)
+                    elif param_type == str:  # Also covers date strings for now
+                        filters[key] = request.args.get(key)
+                    # Add more type checks if necessary, e.g. for date validation here
+                    if key in ['acquaintance_date_after', 'acquaintance_date_before'] and filters[key]:
+                        try:
+                            datetime.datetime.strptime(filters[key], '%Y-%m-%d')
+                        except ValueError:
+                            return jsonify({"error": f"Invalid date format for {key}. Use YYYY-MM-DD."}), 400
+                except ValueError:
+                    return jsonify({"error": f"Invalid type for filter parameter '{key}'."}), 400
 
         cnx = database_logic.get_db_connection()
         cursor = cnx.cursor()
@@ -462,8 +481,11 @@ def api_get_all_crushes():
             "page": page,
             "limit": limit,
             "total_count": total_count,
-            "total_pages": (total_count + limit - 1) // limit
+            "total_pages": (total_count + limit - 1) // limit if limit > 0 else 0
         }), 200
+    except ValueError as ve:  # Catch potential type conversion errors from request.args if not caught above
+        app.logger.warning(f"ValueError processing request args in api_get_all_crushes: {ve}")
+        return jsonify({"error": "Invalid filter parameter value", "details": str(ve)}), 400
     except mariadb.Error as dbe:
         app.logger.error(f"Database error in api_get_all_crushes: {dbe}")
         return jsonify({"error": "Database error"}), 500
@@ -543,7 +565,7 @@ def api_delete_crush(crush_id):
         cnx = database_logic.get_db_connection()
         cursor = cnx.cursor()
         database_logic.delete_existing_crush_for_user(cursor, cnx, crush_id, current_user_id)
-        return jsonify({"message": f"Crush with ID {crush_id} deleted successfully by user {current_user_id}."}), 200
+        return jsonify({"message": f"Crush with ID {crush_id} deleted successfully."}), 200
     except database_logic.NotFoundError as nfe:
         return jsonify({"error": str(nfe)}), 404
     except mariadb.Error as dbe:
@@ -560,7 +582,7 @@ def api_delete_crush(crush_id):
 if __name__ == '__main__':
     if not os.getenv('FLASK_SECRET_KEY'):
         print("WARNING: FLASK_SECRET_KEY environment variable not set, using a temporary key for development.")
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEY:  # Check again before running, in case it was set between app init and run
         print(
-            "WARNING: GEMINI_API_KEY environment variable not set. AI features will be disabled if not caught earlier.")
+            "WARNING: GEMINI_API_KEY environment variable not set. AI features will be disabled if not caught at API call time.")
     app.run(debug=True, host='0.0.0.0', port=5000)

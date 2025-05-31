@@ -89,7 +89,7 @@ def create_tables_if_not_exist(cursor):
                    ),
                        gender VARCHAR
                    (
-                       10
+                       50
                    ),
                        acquaintance_date DATE,
                        age INT,
@@ -103,7 +103,7 @@ def create_tables_if_not_exist(cursor):
                    ),
                        relationship_status VARCHAR
                    (
-                       50
+                       100
                    ),
                        interaction_level INT,
                        feelings_level INT,
@@ -295,8 +295,9 @@ def validate_gender_field(value, field_name, allow_null=True):
     if not str_value:
         if allow_null: return None
         raise ValueError(f"'{field_name}' cannot be empty.")
-    if str_value not in ['male', 'female', 'other']:
-        raise ValueError(f"'{field_name}' must be 'male', 'female', or 'other'.")
+    allowed_genders = ['male', 'female', 'other', 'non-binary', 'prefer not to say']  # Expanded list
+    if str_value not in allowed_genders:
+        raise ValueError(f"'{field_name}' must be one of {', '.join(allowed_genders)}.")
     return str_value
 
 
@@ -309,8 +310,7 @@ def validate_date_field(value, field_name, allow_null=True):
         if allow_null: return None
         raise ValueError(f"'{field_name}' cannot be empty.")
     try:
-        datetime.datetime.strptime(str_value, '%Y-%m-%d')
-        return str_value
+        return datetime.datetime.strptime(str_value, '%Y-%m-%d').date()  # Return date object
     except ValueError:
         raise ValueError(f"'{field_name}' has an invalid date format. Please use YYYY-MM-DD.")
 
@@ -342,19 +342,37 @@ def list_all_crushes_for_user(cursor, user_id, page=1, limit=10, sort_by='id', s
 
     filter_clauses = []
     if filters:
-        if 'gender' in filters and filters['gender']:
+        if filters.get('gender'):
             filter_clauses.append("gender = ?")
             query_params.append(filters['gender'])
-        if 'name_contains' in filters and filters['name_contains']:
+        if filters.get('name_contains'):
             filter_clauses.append("(first_name LIKE ? OR last_name LIKE ?)")
             query_params.append(f"%{filters['name_contains']}%")
             query_params.append(f"%{filters['name_contains']}%")
+        if filters.get('min_age') is not None:
+            filter_clauses.append("age >= ?")
+            query_params.append(filters['min_age'])
+        if filters.get('max_age') is not None:
+            filter_clauses.append("age <= ?")
+            query_params.append(filters['max_age'])
+        if filters.get('acquaintance_date_after'):
+            filter_clauses.append("acquaintance_date >= ?")
+            query_params.append(filters['acquaintance_date_after'])
+        if filters.get('acquaintance_date_before'):
+            filter_clauses.append("acquaintance_date <= ?")
+            query_params.append(filters['acquaintance_date_before'])
+        if filters.get('interaction_level') is not None:
+            filter_clauses.append("interaction_level = ?")
+            query_params.append(filters['interaction_level'])
+        if filters.get('feelings_level') is not None:
+            filter_clauses.append("feelings_level = ?")
+            query_params.append(filters['feelings_level'])
 
     if filter_clauses:
         base_query += " AND " + " AND ".join(filter_clauses)
 
     allowed_sort_columns = ['id', 'first_name', 'last_name', 'acquaintance_date', 'age', 'relationship_status',
-                            'interaction_level', 'feelings_level']
+                            'interaction_level', 'feelings_level', 'gender']
     if sort_by not in allowed_sort_columns:
         sort_by = 'id'
 
@@ -368,17 +386,18 @@ def list_all_crushes_for_user(cursor, user_id, page=1, limit=10, sort_by='id', s
     cursor.execute(base_query, tuple(query_params))
     rows = cursor.fetchall()
 
-    count_query = "SELECT COUNT(*) FROM crushes WHERE user_id = ?"
-    count_params_list = [user_id]  # Use a list to append filter parameters
+    count_query_base = "SELECT COUNT(*) FROM crushes WHERE user_id = ?"
+    count_params_list = [user_id]
 
-    current_query_param_index = 1  # Start after user_id for filters
     if filter_clauses:
-        count_query += " AND " + " AND ".join(filter_clauses)
-        for filter_clause in filter_clauses:
-            num_placeholders_in_clause = filter_clause.count('?')
-            for _ in range(num_placeholders_in_clause):
-                count_params_list.append(query_params[current_query_param_index])
-                current_query_param_index += 1
+        count_query_filters = " AND " + " AND ".join(filter_clauses)
+        count_query = count_query_base + count_query_filters
+        # Extract only the filter parameters from query_params (after the initial user_id)
+        # The number of filter parameters matches the number of '?' in count_query_filters
+        num_filter_placeholders = count_query_filters.count('?')
+        count_params_list.extend(query_params[1: 1 + num_filter_placeholders])
+    else:
+        count_query = count_query_base
 
     cursor.execute(count_query, tuple(count_params_list))
     total_count = cursor.fetchone()[0]
@@ -398,19 +417,24 @@ def get_crush_details_for_user(cursor, crush_id, user_id):
     if not row:
         raise NotFoundError(f"Crush with ID {crush_id} not found or not accessible by this user.")
     columns = [desc[0] for desc in cursor.description]
-    return dict(zip(columns, row))
+    crush_dict = dict(zip(columns, row))
+    if isinstance(crush_dict.get('acquaintance_date'), datetime.date):  # Ensure date is stringified
+        crush_dict['acquaintance_date'] = crush_dict['acquaintance_date'].isoformat()
+    return crush_dict
 
 
 def create_new_crush_for_user(cursor, cnx, crush_data, user_id):
     first_name = validate_text_field(crush_data.get('first_name'), 'first_name', max_length=255, allow_null=False)
     last_name = validate_text_field(crush_data.get('last_name'), 'last_name', max_length=255, allow_null=True)
     gender = validate_gender_field(crush_data.get('gender'), 'gender', allow_null=True)
-    acquaintance_date = validate_date_field(crush_data.get('acquaintance_date'), 'acquaintance_date', allow_null=True)
+    acquaintance_date_obj = validate_date_field(crush_data.get('acquaintance_date'), 'acquaintance_date',
+                                                allow_null=True)
+    acquaintance_date_str = acquaintance_date_obj.isoformat() if acquaintance_date_obj else None
     age = validate_integer_field(crush_data.get('age'), 'age', min_val=0, max_val=120, allow_null=True)
     phone_number = validate_text_field(crush_data.get('phone_number'), 'phone_number', max_length=20, allow_null=True)
     instagram_id = validate_text_field(crush_data.get('instagram_id'), 'instagram_id', max_length=50, allow_null=True)
     relationship_status = validate_text_field(crush_data.get('relationship_status'), 'relationship_status',
-                                              max_length=50, allow_null=True)
+                                              max_length=100, allow_null=True)
     interaction_level = validate_integer_field(crush_data.get('interaction_level'), 'interaction_level', min_val=1,
                                                max_val=5, allow_null=True)
     feelings_level = validate_integer_field(crush_data.get('feelings_level'), 'feelings_level', min_val=1, max_val=5,
@@ -426,7 +450,7 @@ def create_new_crush_for_user(cursor, cnx, crush_data, user_id):
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                        """
     record_to_insert = (
-        user_id, first_name, last_name, gender, acquaintance_date, age, phone_number, instagram_id,
+        user_id, first_name, last_name, gender, acquaintance_date_str, age, phone_number, instagram_id,
         relationship_status, interaction_level, feelings_level, future_plan, notes
     )
     try:
@@ -442,7 +466,7 @@ def update_existing_crush_for_user(cursor, cnx, crush_id, user_id, update_data):
     set_clauses = []
     updated_values = []
 
-    crush_fields = {
+    crush_fields_validators = {
         'first_name': lambda val: validate_text_field(val, 'first_name', max_length=255, allow_null=False),
         'last_name': lambda val: validate_text_field(val, 'last_name', max_length=255, allow_null=True),
         'gender': lambda val: validate_gender_field(val, 'gender', allow_null=True),
@@ -450,7 +474,7 @@ def update_existing_crush_for_user(cursor, cnx, crush_id, user_id, update_data):
         'age': lambda val: validate_integer_field(val, 'age', min_val=0, max_val=120, allow_null=True),
         'phone_number': lambda val: validate_text_field(val, 'phone_number', max_length=20, allow_null=True),
         'instagram_id': lambda val: validate_text_field(val, 'instagram_id', max_length=50, allow_null=True),
-        'relationship_status': lambda val: validate_text_field(val, 'relationship_status', max_length=50,
+        'relationship_status': lambda val: validate_text_field(val, 'relationship_status', max_length=100,
                                                                allow_null=True),
         'interaction_level': lambda val: validate_integer_field(val, 'interaction_level', min_val=1, max_val=5,
                                                                 allow_null=True),
@@ -460,10 +484,15 @@ def update_existing_crush_for_user(cursor, cnx, crush_id, user_id, update_data):
         'notes': lambda val: validate_text_field(val, 'notes', allow_null=True)
     }
 
-    for field, validator in crush_fields.items():
+    for field, validator_func in crush_fields_validators.items():
         if field in update_data:
+            validated_value = validator_func(update_data[field])
+            # For date objects, convert to ISO format string for SQL
+            if isinstance(validated_value, datetime.date):
+                updated_values.append(validated_value.isoformat())
+            else:
+                updated_values.append(validated_value)
             set_clauses.append(f"{field} = ?")
-            updated_values.append(validator(update_data[field]))
 
     if not set_clauses:
         raise ValueError("No valid fields provided for update.")
@@ -474,11 +503,14 @@ def update_existing_crush_for_user(cursor, cnx, crush_id, user_id, update_data):
         cursor.execute(update_sql_query, tuple(updated_values))
         cnx.commit()
         if cursor.rowcount == 0:
-            cursor.execute("SELECT id FROM crushes WHERE id = ?", (crush_id,))
-            if not cursor.fetchone():
-                raise NotFoundError(f"Crush with ID {crush_id} not found.")
-            else:
-                raise UnauthorizedError(f"User not authorized to update crush ID {crush_id}, or no changes were made.")
+            cursor.execute("SELECT id FROM crushes WHERE id = ? AND user_id = ?", (crush_id, user_id))
+            if not cursor.fetchone():  # Check if it's truly not found for this user
+                raise NotFoundError(f"Crush with ID {crush_id} not found for this user.")
+            # If found but 0 rows affected, it means data was identical or some other issue
+            # For simplicity, we'll imply this as "no changes needed or unauthorized"
+            # but the specific error is more likely to be caught by the get_crush_details_for_user if called after
+            raise UnauthorizedError(
+                f"No changes made to crush ID {crush_id}. Data might be identical, or not authorized.")
         return cursor.rowcount
     except mariadb.Error as err:
         cnx.rollback()
