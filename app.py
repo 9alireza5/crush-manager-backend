@@ -113,7 +113,7 @@ def api_register_user():
         if cnx: cnx.close()
 
 
-@app.route('/login', methods=['POST'])
+@app.route('/login', methods=['POST', 'OPTIONS'])
 def api_login_user():
     cnx = None;
     cursor = None
@@ -327,7 +327,7 @@ def api_reset_password():
 
 
 # --- Crushes Routes (Now protected and user-specific) ---
-@app.route('/crushes', methods=['POST'])
+@app.route('/crushes', methods=['POST', 'OPTIONS'])
 @token_required
 def api_create_crush():
     current_user_id = g.current_user_id
