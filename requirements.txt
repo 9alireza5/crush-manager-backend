@@ -1,0 +1,10 @@
+Flask
+mysql-connector-python
+mariadb
+requests
+passlib
+argon2-cffi
+PyJWT
+argon2-cffi
+flask-cors
+google-generativeai
